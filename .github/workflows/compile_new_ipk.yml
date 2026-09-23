@@ -8,6 +8,9 @@ on:
       - 'luci-app-ndsvoucher/Makefile'
   workflow_dispatch:
 
+permissions:
+  contents: write
+
 jobs:
   Get-Version:
     runs-on: ubuntu-latest
@@ -31,18 +34,49 @@ jobs:
           echo "version=$V" >> $GITHUB_OUTPUT
           echo "New version: $V"
 
-      - name: Checkout Package Branch
-        uses: actions/checkout@v5
-        with:
-          ref: package
-          path: pkg-branch
-          continue-on-error: true
+      - name: Ensure Package Branch Exists
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          git config --global user.name 'github-actions[bot]'
+          git config --global user.email 'github-actions[bot]@users.noreply.github.com'
+
+          if git ls-remote --exit-code --heads \
+              "https://x-access-token:${GH_TOKEN}@github.com/${{ github.repository }}.git" \
+              package > /dev/null 2>&1; then
+            echo "Branch 'package' already exists."
+          else
+            echo "Branch 'package' not found. Creating it..."
+            cd /tmp
+            git clone --depth=1 \
+              "https://x-access-token:${GH_TOKEN}@github.com/${{ github.repository }}.git" \
+              repo-tmp
+            cd repo-tmp
+            git checkout --orphan package
+            git rm -rf . || true
+            mkdir -p main dev
+            echo "v0.0.0" > main/version
+            echo "v0.0.0" > dev/version
+            git add .
+            git commit -m "Init package branch"
+            git push origin package
+            echo "Branch 'package' created."
+          fi
+
+      - name: Clone Package Branch
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          git clone --depth=1 --branch=package \
+            "https://x-access-token:${GH_TOKEN}@github.com/${{ github.repository }}.git" \
+            pkg-branch
 
       - name: Get Current Version
         id: current_version
         run: |
-          if [ -f ./pkg-branch/${{ github.ref_name }}/version ]; then
-            V=$(sed -n 1p ./pkg-branch/${{ github.ref_name }}/version | awk -F 'v' '{print $2}' | tr -d ' \r\n')
+          VERSION_FILE="./pkg-branch/${{ github.ref_name }}/version"
+          if [ -f "$VERSION_FILE" ]; then
+            V=$(sed -n 1p "$VERSION_FILE" | awk -F 'v' '{print $2}' | tr -d ' \r\n')
           else
             V="0.0.0"
           fi
@@ -187,15 +221,12 @@ jobs:
 
       - name: Commit and Push New Version
         run: |
-          # Cleanup old files
           rm -f ./${{ github.ref_name }}/luci-app-ndsvoucher_*.ipk
           rm -f ./${{ github.ref_name }}/luci-app-ndsvoucher-*.apk
 
-          # Write version file
           echo "v${{ needs.Get-Version.outputs.version }}" > ./${{ github.ref_name }}/version
           echo "https://img.shields.io/badge/New Release-v${{ needs.Get-Version.outputs.version }}-orange.svg" >> ./${{ github.ref_name }}/version
 
-          # Copy artifacts
           if ls ./ipk/luci-app-ndsvoucher_*.ipk 1> /dev/null 2>&1; then
             cp ./ipk/luci-app-ndsvoucher_*.ipk "./${{ github.ref_name }}/"
             echo "IPK copied."
@@ -210,13 +241,11 @@ jobs:
             echo "::warning::No APK artifact found."
           fi
 
-          # Update README if exists
           if [ -f ./${{ github.ref_name }}/README.md ]; then
             sed -i -E "s|source code-v[0-9.]+-green|source code-v${{ needs.Get-Version.outputs.version }}-green|g" ./${{ github.ref_name }}/README.md || true
             sed -i -E "s|New Release-v[0-9.]+-orange|New Release-v${{ needs.Get-Version.outputs.version }}-orange|g" ./${{ github.ref_name }}/README.md || true
           fi
 
-          # Git commit & push
           git config user.name 'github-actions[bot]'
           git config user.email 'github-actions[bot]@users.noreply.github.com'
           git add .
