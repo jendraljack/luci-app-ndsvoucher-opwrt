@@ -13,7 +13,7 @@ permissions:
 
 jobs:
   Get-Version:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-22.04
     outputs:
       version: ${{ steps.version.outputs.version }}
       current_version: ${{ steps.current_version.outputs.version }}
@@ -84,7 +84,7 @@ jobs:
           echo "Current version: $V"
 
   Compile:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-22.04
     needs: Get-Version
     if: ${{ needs.Get-Version.outputs.version != '' && needs.Get-Version.outputs.version != needs.Get-Version.outputs.current_version }}
     strategy:
@@ -107,7 +107,22 @@ jobs:
           DEBIAN_FRONTEND: noninteractive
         run: |
           sudo apt-get update
-          sudo apt-get -y install curl git tar xz-utils python3 python3-pyelftools python3-setuptools
+          sudo apt-get -y install \
+            curl git tar xz-utils \
+            build-essential \
+            python2.7 python2.7-dev python-is-python2 \
+            libncurses5-dev libncursesw5-dev \
+            zlib1g-dev gawk flex gettext \
+            libssl-dev rsync unzip wget file bzip2 \
+            subversion
+
+      - name: Verify Python 2
+        run: |
+          python2.7 --version
+          which python2.7
+          # Buat symlink /usr/bin/python -> python2.7 (SDK 18.06 panggil 'python')
+          sudo ln -sf /usr/bin/python2.7 /usr/local/bin/python || true
+          python --version || true
 
       - name: Download SDK
         run: |
@@ -138,7 +153,7 @@ jobs:
         run: |
           cd tmp/${{ matrix.target.sdk_dir }}
           make defconfig
-          make package/luci-app-ndsvoucher/compile V=99
+          make FORCE=1 package/luci-app-ndsvoucher/compile V=99
 
       - name: Verify Artifact Exists
         run: |
@@ -160,7 +175,7 @@ jobs:
           if-no-files-found: error
 
   Post-Process:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-22.04
     needs: [Compile, Get-Version]
     if: ${{ needs.Compile.result == 'success' }}
     steps:
@@ -187,7 +202,6 @@ jobs:
 
       - name: Commit and Push New Version
         run: |
-          # Cari file .ipk di mana pun di dalam ./ipk/
           IPK_FILE=$(find ./ipk -name "luci-app-ndsvoucher_*.ipk" | head -n 1)
           if [ -z "$IPK_FILE" ]; then
             echo "::error::No IPK file found in downloaded artifact."
