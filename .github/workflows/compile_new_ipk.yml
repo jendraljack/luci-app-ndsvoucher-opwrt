@@ -1,11 +1,11 @@
-name: Compile The New Version OpenClash
+name: Compile The New Version ndsvoucher
 
-on: 
+on:
   push:
     branches:
       - dev
     paths:
-      - 'luci-app-openclash/Makefile'
+      - 'luci-app-ndsvoucher/Makefile'
   workflow_dispatch:
 
 jobs:
@@ -15,38 +15,61 @@ jobs:
       version: ${{ steps.version.outputs.version }}
       current_version: ${{ steps.current_version.outputs.version }}
     steps:
-      - name: Clone Repository
-        uses: actions/checkout@v4
+      - name: Checkout Source Branch
+        uses: actions/checkout@v5
         with:
           ref: ${{ github.ref_name }}
 
-      - name: New Version
+      - name: Get New Version
         id: version
         run: |
-          echo "version=$(grep 'PKG_VERSION:=' ./luci-app-openclash/Makefile |awk -F '=' '{print $2}')" >> $GITHUB_OUTPUT
+          V=$(grep 'PKG_VERSION:=' ./luci-app-ndsvoucher/Makefile | awk -F '=' '{print $2}' | tr -d ' \r\n')
+          if [ -z "$V" ]; then
+            echo "::error::PKG_VERSION not found in Makefile"
+            exit 1
+          fi
+          echo "version=$V" >> $GITHUB_OUTPUT
+          echo "New version: $V"
 
-      - name: Clone Repository
-        uses: actions/checkout@v4
+      - name: Checkout Package Branch
+        uses: actions/checkout@v5
         with:
           ref: package
+          path: pkg-branch
+          continue-on-error: true
 
-      - name: Current Version
+      - name: Get Current Version
         id: current_version
         run: |
-          echo "version=$(sed -n 1p ./${{ github.ref_name }}/version |awk -F 'v' '{print $2}')" >> $GITHUB_OUTPUT
+          if [ -f ./pkg-branch/${{ github.ref_name }}/version ]; then
+            V=$(sed -n 1p ./pkg-branch/${{ github.ref_name }}/version | awk -F 'v' '{print $2}' | tr -d ' \r\n')
+          else
+            V="0.0.0"
+          fi
+          echo "version=$V" >> $GITHUB_OUTPUT
+          echo "Current version: $V"
 
   Compile:
     runs-on: ubuntu-latest
     needs: Get-Version
-    if: ${{ needs.Get-Version.outputs.version != needs.Get-Version.outputs.current_version }}
+    if: ${{ needs.Get-Version.outputs.version != '' && needs.Get-Version.outputs.version != needs.Get-Version.outputs.current_version }}
     strategy:
+      fail-fast: false
       matrix:
         target:
-          - { name: ipk, sdk_url: "https://mirrors.pku.edu.cn/openwrt/releases/22.03.0/targets/x86/64/openwrt-sdk-22.03.0-x86-64_gcc-11.2.0_musl.Linux-x86_64.tar.xz", sdk_tar: "SDK.tar.xz", sdk_dir: "SDK", artifact_pattern: "luci-app-openclash_*.ipk" }
-          - { name: apk, sdk_url: "snapshot", sdk_tar: "SNAPSDK.tar.zst", sdk_dir: "SNAPSDK", artifact_pattern: "luci-app-openclash-*.apk" }
+          - name: ipk
+            sdk_url: "https://mirrors.pku.edu.cn/openwrt/releases/22.03.0/targets/x86/64/openwrt-sdk-22.03.0-x86-64_gcc-11.2.0_musl.Linux-x86_64.tar.xz"
+            sdk_tar: "SDK.tar.xz"
+            sdk_dir: "SDK"
+            artifact_pattern: "luci-app-ndsvoucher_*.ipk"
+          - name: apk
+            sdk_url: "snapshot"
+            sdk_tar: "SNAPSDK.tar.zst"
+            sdk_dir: "SNAPSDK"
+            artifact_pattern: "luci-app-ndsvoucher-*.apk"
     steps:
-      - name: Checkout OpenClash Source
-        uses: actions/checkout@v4
+      - name: Checkout Source
+        uses: actions/checkout@v5
         with:
           ref: ${{ github.ref_name }}
 
@@ -61,14 +84,23 @@ jobs:
         run: |
           mkdir -p tmp
           if [ "${{ matrix.target.name }}" = "ipk" ]; then
-            curl -SLk --connect-timeout 30 --retry 2 "${{ matrix.target.sdk_url }}" -o "./tmp/${{ matrix.target.sdk_tar }}"
+            curl -SLk --connect-timeout 30 --retry 3 \
+              "${{ matrix.target.sdk_url }}" \
+              -o "./tmp/${{ matrix.target.sdk_tar }}"
             cd tmp
             tar xf ${{ matrix.target.sdk_tar }}
             mv openwrt-sdk-* ${{ matrix.target.sdk_dir }}
           else
             BASE_URL="https://downloads.openwrt.org/snapshots/targets/x86/64/"
             SDK_NAME=$(curl -s $BASE_URL | grep -oE 'openwrt-sdk-x86-64[^"]+\.tar\.zst' | head -n 1)
-            curl -SLk --connect-timeout 30 --retry 2 "$BASE_URL/$SDK_NAME" -o "./tmp/${{ matrix.target.sdk_tar }}"
+            if [ -z "$SDK_NAME" ]; then
+              echo "::error::Failed to find SDK on snapshot server"
+              exit 1
+            fi
+            echo "Downloading: $SDK_NAME"
+            curl -SLk --connect-timeout 30 --retry 3 \
+              "$BASE_URL/$SDK_NAME" \
+              -o "./tmp/${{ matrix.target.sdk_tar }}"
             cd tmp
             zstd -d ${{ matrix.target.sdk_tar }}
             tar xf SNAPSDK.tar
@@ -76,64 +108,121 @@ jobs:
             mv "$SDK_DIR" "${{ matrix.target.sdk_dir }}"
           fi
 
-      - name: Copy OpenClash Source Codes
+      - name: Copy ndsvoucher Source Code
         run: |
-          mkdir -p tmp/${{ matrix.target.sdk_dir }}/package/luci-app-openclash
-          cp -rf ./luci-app-openclash/. tmp/${{ matrix.target.sdk_dir }}/package/luci-app-openclash/
+          mkdir -p tmp/${{ matrix.target.sdk_dir }}/package/luci-app-ndsvoucher
+          cp -rf ./luci-app-ndsvoucher/. tmp/${{ matrix.target.sdk_dir }}/package/luci-app-ndsvoucher/
+          echo "--- Package contents ---"
+          ls -la tmp/${{ matrix.target.sdk_dir }}/package/luci-app-ndsvoucher/
 
-      - name: Compile po2lmo
+      - name: Compile po2lmo (optional)
+        continue-on-error: true
         run: |
-          cd tmp/${{ matrix.target.sdk_dir }}/package/luci-app-openclash/tools/po2lmo
-          make && sudo make install
+          PO2LMO_DIR="tmp/${{ matrix.target.sdk_dir }}/package/luci-app-ndsvoucher/tools/po2lmo"
+          if [ -d "$PO2LMO_DIR" ]; then
+            cd "$PO2LMO_DIR"
+            make && sudo make install
+          else
+            echo "po2lmo directory not found, skipping."
+          fi
 
-      - name: Compile OpenClash
+      - name: Compile ndsvoucher
         run: |
           cd tmp/${{ matrix.target.sdk_dir }}
           make defconfig
-          make package/luci-app-openclash/compile V=99
+          make package/luci-app-ndsvoucher/compile V=99
+
+      - name: Verify Artifact Exists
+        run: |
+          PATTERN="tmp/${{ matrix.target.sdk_dir }}/bin/packages/x86_64/base/${{ matrix.target.artifact_pattern }}"
+          if ! ls $PATTERN 1> /dev/null 2>&1; then
+            echo "::error::Artifact not found with pattern: $PATTERN"
+            echo "--- Listing bin/packages/x86_64/base/ ---"
+            ls -la tmp/${{ matrix.target.sdk_dir }}/bin/packages/x86_64/base/ || true
+            exit 1
+          fi
+          echo "Artifact found:"
+          ls -la $PATTERN
 
       - name: Upload Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: openclash-${{ matrix.target.name }}
+          name: ndsvoucher-${{ matrix.target.name }}
           path: tmp/${{ matrix.target.sdk_dir }}/bin/packages/x86_64/base/${{ matrix.target.artifact_pattern }}
+          if-no-files-found: error
 
   Post-Process:
     runs-on: ubuntu-latest
     needs: [Compile, Get-Version]
+    if: ${{ needs.Compile.result == 'success' }}
     steps:
-      - name: Checkout package branch
-        uses: actions/checkout@v4
+      - name: Checkout Package Branch
+        uses: actions/checkout@v5
         with:
           ref: package
+          fetch-depth: 0
 
       - name: Download IPK Artifact
         uses: actions/download-artifact@v4
         with:
-          name: openclash-ipk
-          path: ./
+          name: ndsvoucher-ipk
+          path: ./ipk
 
       - name: Download APK Artifact
         uses: actions/download-artifact@v4
         with:
-          name: openclash-apk
-          path: ./
+          name: ndsvoucher-apk
+          path: ./apk
+
+      - name: List Downloaded Files
+        run: |
+          echo "--- IPK files ---"
+          ls -la ./ipk/ || true
+          echo "--- APK files ---"
+          ls -la ./apk/ || true
+
+      - name: Prepare Branch Directory
+        run: |
+          mkdir -p ./${{ github.ref_name }}
 
       - name: Commit and Push New Version
         run: |
-          rm -rf ./${{ github.ref_name }}/luci-app-openclash*
+          # Cleanup old files
+          rm -f ./${{ github.ref_name }}/luci-app-ndsvoucher_*.ipk
+          rm -f ./${{ github.ref_name }}/luci-app-ndsvoucher-*.apk
+
+          # Write version file
           echo "v${{ needs.Get-Version.outputs.version }}" > ./${{ github.ref_name }}/version
           echo "https://img.shields.io/badge/New Release-v${{ needs.Get-Version.outputs.version }}-orange.svg" >> ./${{ github.ref_name }}/version
-          cp ./luci-app-openclash_*.ipk "./${{ github.ref_name }}/"
-          cp ./luci-app-openclash-*.apk "./${{ github.ref_name }}/"
-          rm -f ./luci-app-openclash_*.ipk
-          rm -f ./luci-app-openclash-*.apk
-          sed -i -E "s/OpenClash\/tree\/v(.*)/OpenClash\/tree\/v${{ needs.Get-Version.outputs.version }}/g" ./${{ github.ref_name }}/README.md
-          sed -i -E "s/OpenClash\/releases\/tag\/v(.*)/OpenClash\/releases\/tag\/v${{ needs.Get-Version.outputs.version }}/g" ./${{ github.ref_name }}/README.md
-          sed -i -E "s/source code-v(.*)-green/source code-v${{ needs.Get-Version.outputs.version }}-green/g" ./${{ github.ref_name }}/README.md
-          sed -i -E "s/New Release-v(.*)-orange/New Release-v${{ needs.Get-Version.outputs.version }}-orange/g" ./${{ github.ref_name }}/README.md
+
+          # Copy artifacts
+          if ls ./ipk/luci-app-ndsvoucher_*.ipk 1> /dev/null 2>&1; then
+            cp ./ipk/luci-app-ndsvoucher_*.ipk "./${{ github.ref_name }}/"
+            echo "IPK copied."
+          else
+            echo "::warning::No IPK artifact found."
+          fi
+
+          if ls ./apk/luci-app-ndsvoucher-*.apk 1> /dev/null 2>&1; then
+            cp ./apk/luci-app-ndsvoucher-*.apk "./${{ github.ref_name }}/"
+            echo "APK copied."
+          else
+            echo "::warning::No APK artifact found."
+          fi
+
+          # Update README if exists
+          if [ -f ./${{ github.ref_name }}/README.md ]; then
+            sed -i -E "s|source code-v[0-9.]+-green|source code-v${{ needs.Get-Version.outputs.version }}-green|g" ./${{ github.ref_name }}/README.md || true
+            sed -i -E "s|New Release-v[0-9.]+-orange|New Release-v${{ needs.Get-Version.outputs.version }}-orange|g" ./${{ github.ref_name }}/README.md || true
+          fi
+
+          # Git commit & push
           git config user.name 'github-actions[bot]'
           git config user.email 'github-actions[bot]@users.noreply.github.com'
           git add .
-          git commit -m "Auto Release: v${{ needs.Get-Version.outputs.version }}"
-          git push
+          if git diff --staged --quiet; then
+            echo "No changes to commit."
+          else
+            git commit -m "Auto Release: v${{ needs.Get-Version.outputs.version }}"
+            git push
+          fi
