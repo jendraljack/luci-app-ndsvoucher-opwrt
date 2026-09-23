@@ -92,15 +92,10 @@ jobs:
       matrix:
         target:
           - name: ipk
-            sdk_url: "https://mirrors.pku.edu.cn/openwrt/releases/22.03.0/targets/x86/64/openwrt-sdk-22.03.0-x86-64_gcc-11.2.0_musl.Linux-x86_64.tar.xz"
+            sdk_url: "https://archive.openwrt.org/releases/18.06.9/targets/ar71xx/tiny/openwrt-sdk-18.06.9-ar71xx-tiny_gcc-7.3.0_musl.Linux-x86_64.tar.xz"
             sdk_tar: "SDK.tar.xz"
             sdk_dir: "SDK"
             artifact_pattern: "luci-app-ndsvoucher_*.ipk"
-          - name: apk
-            sdk_url: "snapshot"
-            sdk_tar: "SNAPSDK.tar.zst"
-            sdk_dir: "SNAPSDK"
-            artifact_pattern: "luci-app-ndsvoucher-*.apk"
     steps:
       - name: Checkout Source
         uses: actions/checkout@v5
@@ -112,35 +107,19 @@ jobs:
           DEBIAN_FRONTEND: noninteractive
         run: |
           sudo apt-get update
-          sudo apt-get -y install curl git tar zstd python3 python3-pyelftools python3-setuptools
+          sudo apt-get -y install curl git tar xz-utils python3 python3-pyelftools python3-setuptools
 
       - name: Download SDK
         run: |
           mkdir -p tmp
-          if [ "${{ matrix.target.name }}" = "ipk" ]; then
-            curl -SLk --connect-timeout 30 --retry 3 \
-              "${{ matrix.target.sdk_url }}" \
-              -o "./tmp/${{ matrix.target.sdk_tar }}"
-            cd tmp
-            tar xf ${{ matrix.target.sdk_tar }}
-            mv openwrt-sdk-* ${{ matrix.target.sdk_dir }}
-          else
-            BASE_URL="https://downloads.openwrt.org/snapshots/targets/x86/64/"
-            SDK_NAME=$(curl -s $BASE_URL | grep -oE 'openwrt-sdk-x86-64[^"]+\.tar\.zst' | head -n 1)
-            if [ -z "$SDK_NAME" ]; then
-              echo "::error::Failed to find SDK on snapshot server"
-              exit 1
-            fi
-            echo "Downloading: $SDK_NAME"
-            curl -SLk --connect-timeout 30 --retry 3 \
-              "$BASE_URL/$SDK_NAME" \
-              -o "./tmp/${{ matrix.target.sdk_tar }}"
-            cd tmp
-            zstd -d ${{ matrix.target.sdk_tar }}
-            tar xf SNAPSDK.tar
-            SDK_DIR=$(tar tf SNAPSDK.tar | head -n 1 | cut -d/ -f1)
-            mv "$SDK_DIR" "${{ matrix.target.sdk_dir }}"
-          fi
+          curl -SLk --connect-timeout 30 --retry 3 \
+            "${{ matrix.target.sdk_url }}" \
+            -o "./tmp/${{ matrix.target.sdk_tar }}"
+          cd tmp
+          tar xf ${{ matrix.target.sdk_tar }}
+          mv openwrt-sdk-* ${{ matrix.target.sdk_dir }}
+          echo "--- SDK directory contents ---"
+          ls -la ${{ matrix.target.sdk_dir }}/
 
       - name: Copy ndsvoucher Source Code
         run: |
@@ -149,16 +128,11 @@ jobs:
           echo "--- Package contents ---"
           ls -la tmp/${{ matrix.target.sdk_dir }}/package/luci-app-ndsvoucher/
 
-      - name: Compile po2lmo (optional)
-        continue-on-error: true
+      - name: Install Feeds
         run: |
-          PO2LMO_DIR="tmp/${{ matrix.target.sdk_dir }}/package/luci-app-ndsvoucher/tools/po2lmo"
-          if [ -d "$PO2LMO_DIR" ]; then
-            cd "$PO2LMO_DIR"
-            make && sudo make install
-          else
-            echo "po2lmo directory not found, skipping."
-          fi
+          cd tmp/${{ matrix.target.sdk_dir }}
+          ./scripts/feeds update -a
+          ./scripts/feeds install -a
 
       - name: Compile ndsvoucher
         run: |
@@ -168,11 +142,11 @@ jobs:
 
       - name: Verify Artifact Exists
         run: |
-          PATTERN="tmp/${{ matrix.target.sdk_dir }}/bin/packages/x86_64/base/${{ matrix.target.artifact_pattern }}"
+          PATTERN="tmp/${{ matrix.target.sdk_dir }}/bin/packages/*/base/${{ matrix.target.artifact_pattern }}"
           if ! ls $PATTERN 1> /dev/null 2>&1; then
             echo "::error::Artifact not found with pattern: $PATTERN"
-            echo "--- Listing bin/packages/x86_64/base/ ---"
-            ls -la tmp/${{ matrix.target.sdk_dir }}/bin/packages/x86_64/base/ || true
+            echo "--- Listing bin/packages/ ---"
+            find tmp/${{ matrix.target.sdk_dir }}/bin/packages/ -type f 2>/dev/null || true
             exit 1
           fi
           echo "Artifact found:"
@@ -182,7 +156,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: ndsvoucher-${{ matrix.target.name }}
-          path: tmp/${{ matrix.target.sdk_dir }}/bin/packages/x86_64/base/${{ matrix.target.artifact_pattern }}
+          path: tmp/${{ matrix.target.sdk_dir }}/bin/packages/*/base/${{ matrix.target.artifact_pattern }}
           if-no-files-found: error
 
   Post-Process:
@@ -202,18 +176,10 @@ jobs:
           name: ndsvoucher-ipk
           path: ./ipk
 
-      - name: Download APK Artifact
-        uses: actions/download-artifact@v4
-        with:
-          name: ndsvoucher-apk
-          path: ./apk
-
       - name: List Downloaded Files
         run: |
           echo "--- IPK files ---"
-          ls -la ./ipk/ || true
-          echo "--- APK files ---"
-          ls -la ./apk/ || true
+          ls -laR ./ipk/ || true
 
       - name: Prepare Branch Directory
         run: |
@@ -221,25 +187,20 @@ jobs:
 
       - name: Commit and Push New Version
         run: |
+          # Cari file .ipk di mana pun di dalam ./ipk/
+          IPK_FILE=$(find ./ipk -name "luci-app-ndsvoucher_*.ipk" | head -n 1)
+          if [ -z "$IPK_FILE" ]; then
+            echo "::error::No IPK file found in downloaded artifact."
+            exit 1
+          fi
+          echo "Found IPK: $IPK_FILE"
+
           rm -f ./${{ github.ref_name }}/luci-app-ndsvoucher_*.ipk
-          rm -f ./${{ github.ref_name }}/luci-app-ndsvoucher-*.apk
 
           echo "v${{ needs.Get-Version.outputs.version }}" > ./${{ github.ref_name }}/version
           echo "https://img.shields.io/badge/New Release-v${{ needs.Get-Version.outputs.version }}-orange.svg" >> ./${{ github.ref_name }}/version
 
-          if ls ./ipk/luci-app-ndsvoucher_*.ipk 1> /dev/null 2>&1; then
-            cp ./ipk/luci-app-ndsvoucher_*.ipk "./${{ github.ref_name }}/"
-            echo "IPK copied."
-          else
-            echo "::warning::No IPK artifact found."
-          fi
-
-          if ls ./apk/luci-app-ndsvoucher-*.apk 1> /dev/null 2>&1; then
-            cp ./apk/luci-app-ndsvoucher-*.apk "./${{ github.ref_name }}/"
-            echo "APK copied."
-          else
-            echo "::warning::No APK artifact found."
-          fi
+          cp "$IPK_FILE" "./${{ github.ref_name }}/"
 
           if [ -f ./${{ github.ref_name }}/README.md ]; then
             sed -i -E "s|source code-v[0-9.]+-green|source code-v${{ needs.Get-Version.outputs.version }}-green|g" ./${{ github.ref_name }}/README.md || true
