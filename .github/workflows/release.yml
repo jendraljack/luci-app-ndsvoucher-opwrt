@@ -1,16 +1,16 @@
 name: Build and Release LuCI App
 
 on: 
-  push:
-    branches:
-      - main
-    paths:
-      - 'luci-app-ndsvoucher/Makefile'
+#  push:
+ #   branches:
+    #  - main
+  #  paths:
+#      - 'luci-app-ndsvoucher/Makefile'
   workflow_dispatch:
-  release:
-    types: [published]
-  schedule:
-    - cron: '0 2 * * 1'  # Run every Monday at 2 AM UTC
+#  release:
+  #  types: [published]
+#  schedule:
+   # - cron: '0 2 * * 1'  # Run every Monday at 2 AM UTC
 
 jobs:
   Get-Version:
